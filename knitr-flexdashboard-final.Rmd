@@ -1,0 +1,849 @@
+---
+title: "COVID-19 Tweet Analysis"
+output: 
+  flexdashboard::flex_dashboard:
+    vertical_layout: scroll
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# Initialise packages:
+library(ggplot2)
+library(GGally)
+library(ggcorrplot)
+library(gridExtra)
+library(hexbin)
+library(kableExtra)
+library(lubridate)
+library(RColorBrewer)
+library(SnowballC)
+library(stopwords)
+library(tm)
+library(tidytext)
+library(tidyverse)
+library(tokenizers)
+library(wordcloud)
+library(rnaturalearth)
+library(plyr)
+library(dplyr)
+library(readxl)
+library(rworldmap)
+library(RColorBrewer)
+
+# Load up datasets:
+twts <- readRDS('tweets.rds')
+geo <- readRDS('geo.rds')
+kable_options <- c("striped", "hover", "condensed")
+```
+
+<style type="text/css">
+.chart-stage {
+   font-size: 110%;
+</style>
+
+<style type="text/css">
+.chart-title {
+   font-size: 130%;
+</style>
+
+<style type="text/css">
+.big {
+   font-size: 130%;
+</style>
+
+0. About
+=====================================
+
+### Authors
+
+Team Knitr
+
+* Daniel Raneri
+* Guy Davis 
+* Samuel Goh 
+* Rhett Crowther
+
+### Github Repository
+
+The data is too large to uploaded onto the ED platform. Please visit the following Github repository for access to the entire workspace:
+
+* https://github.com/sygoh23/etc1010_knitr_final
+
+### Data Introduction
+
+Our dataset contains the metadata for over 104000 tweets which mentioned "covid". The majority of the tweets are dated to the 15th of May 2020, which is when the data was scraped from Twitter. The dataset was cleaned and extended to include variables relating to the sentiment of the words in each tweet.
+
+### Data Downloading
+
+The bulk of the data we have used consists of tweets. These were sourced through the Twitter API
+and are mostly from the 15th of May. The data was downloaded in 7 batches, each with slightly
+under 15,000 tweets. Each batch of downloads was saved as a file called ‘tweets_n.rds’ which can be
+found in the ‘data’ folder submitted with Milestone 3. The format of the downloads is captured in ’00-downloading-tweets.Rmd’ which was also submitted with Milestone 3. Note that using the Twitter API requires a free private developer license, so the code is not usable without a private key. It is also only possible to download tweets up to a week in the past, so the
+exact dataset that we have used in our project cannot be reproduced.
+
+### Sharing
+
+This storyboard can be accessed via the following link:
+
+* https://bit.ly/ETC1010-KNITR
+
+### Storyboard Usage
+
+<div class="big">
+**Please use full screen for the best viewing experience!**
+</div>
+
+1. Data Cleaning
+=====================================
+
+### Data Cleaning
+
+Stage 1: Initial Data Cleaning
+
+Read and combine data...
+```{r echo = TRUE, eval = FALSE}
+saved_data_1 <- readRDS(file = "tweets_1.rds")
+saved_data_2 <- readRDS(file = "tweets_2.rds")
+saved_data_3 <- readRDS(file = "tweets_3.rds")
+saved_data_4 <- readRDS(file = "tweets_4.rds")
+saved_data_5 <- readRDS(file = "tweets_5.rds")
+saved_data_6 <- readRDS(file = "tweets_6.rds")
+saved_data_7 <- readRDS(file = "tweets_7.rds")
+saved_data <- rbind(saved_data_1,saved_data_2,saved_data_3,saved_data_4,saved_data_5,saved_data_6,saved_data_7)
+# add an index column
+saved_data$index <- 1:nrow(saved_data)
+# add a time of day column
+saved_data<- saved_data%>% mutate(time=hms(created_at))
+```
+
+Get the numbers of specific things that are mentioned in the tweets...
+```{r echo = TRUE, eval = FALSE}
+# add a column with the number of hashtags present in a document
+saved_data <- saved_data %>%
+  select(index, hashtags) %>%
+  unnest(hashtags) %>%
+  filter(!is.na(hashtags)) %>% 
+  group_by(index) %>% 
+  summarise(hashtag_count = n()) %>% 
+  right_join(saved_data) %>% 
+  mutate(hashtag_count = ifelse(!is.na(hashtag_count), hashtag_count, 0))
+# add a variable for the number of mentioned screen names in a tweet
+saved_data<-saved_data %>% 
+  select(index,mentions_screen_name) %>%
+  unnest(mentions_screen_name) %>% 
+  filter(!is.na(mentions_screen_name)) %>%
+  group_by(index) %>%
+  summarise(name_counts=n()) %>%
+  right_join(saved_data) %>%
+  mutate(name_counts=ifelse(!is.na(name_counts),name_counts,0))
+# add a variable for the number of mentioned urls
+saved_data<-saved_data %>% 
+  select(index,urls_url) %>%
+  unnest(urls_url) %>% 
+  filter(!is.na(urls_url)) %>%
+  group_by(index) %>%
+  summarise(url_count=n()) %>% 
+  right_join(saved_data) %>%
+  mutate(url_count=ifelse(!is.na(url_count),url_count,0))
+# add binary variables for if the tweet had any favourites and if they mentioned more than 1 friend
+saved_data<- saved_data %>% 
+  mutate(engagement_binary=ifelse(favorite_count>0,1,0)) %>%
+  mutate(binary_friends=ifelse(name_counts>1,1,0))
+```
+
+Select only variables that could be useful...
+```{r echo = TRUE, eval = FALSE}
+intermediate_step<- saved_data %>%
+  select(c("index","user_id","status_id","created_at","screen_name","text","source","display_text_width","is_quote","reply_to_screen_name",
+           "favorite_count","retweet_count","lang","quoted_name","quoted_followers_count","quoted_verified","place_type","country","country_code",
+           "bbox_coords","coords_coords","location","description","followers_count","friends_count","listed_count","statuses_count","favourites_count","account_created_at",
+           "verified","hashtag_count","engagement_binary","binary_friends","name_counts","url_count"))
+```
+
+Stage 2: Adding Sentiment Information
+
+Tokenise the text data to get the number of sentiment words...
+```{r echo = TRUE, eval = FALSE}
+# create a separate text data frame
+text_data<-intermediate_step %>% 
+  select(c("index","text")) %>%
+  unnest_tokens(output = word,input = text,token = "words",to_lower=TRUE)
+```
+
+Count the number of words in each tweet so we can standardise the sentiment later...
+```{r echo = TRUE, eval = FALSE}
+word_counts<-text_data %>% 
+  group_by(index) %>% 
+  summarise(num_words=n())
+```
+
+Use the text dataframe to get sentiment word numbers for each tweet...
+```{r echo = TRUE, eval = FALSE}
+sentiments<- get_sentiments("nrc")
+tidy_tweets_sentiment <-text_data %>%
+  inner_join(sentiments) %>%
+  group_by(index,sentiment) %>%
+  summarise(count=n()) %>%
+  pivot_wider(names_from=c("sentiment"),values_from=count)
+# impute zeros into sentiment data
+tidy_tweets_sentiment[is.na(tidy_tweets_sentiment)] <- 0
+```
+
+Get the average positivity of the words in a tweet...
+```{r echo = TRUE, eval = FALSE}
+sentiments<- get_sentiments("afinn")
+tidy_tweets_positive <-text_data %>%
+  inner_join(sentiments)%>%
+  group_by(index)%>%
+  summarise(average_positive_sentiment=mean(value))
+```
+
+Join information into a single table and save results...
+```{r echo = TRUE, eval = FALSE}
+tweets_with_sentiment<-left_join(intermediate_step,word_counts) %>%
+  left_join(tidy_tweets_sentiment)%>%left_join(tidy_tweets_positive)
+saveRDS(tweets_with_sentiment, file = "tweets_final")
+```
+
+Stage 3: Adding Location Information
+
+Extract tweet locations from dataframe...
+```{r echo = TRUE, eval = FALSE}
+get_locations<-function(input_data){
+  geo_locations<-input_data %>%
+  select(c("bbox_coords","location","index")) %>%
+  unnest_wider(bbox_coords,names_repair = "minimal",names_sep="_") %>%
+  filter(!is.na(`bbox_coords_...1`)) %>%
+  mutate(x=(bbox_coords_...1+bbox_coords_...2+bbox_coords_...4+bbox_coords_...3)/4,
+         y=(bbox_coords_...5+bbox_coords_...6+bbox_coords_...7+bbox_coords_...8)/4) %>%
+  select(c("location","index","x","y"))
+  return(geo_locations)
+}
+geo_locations <- tweets_with_sentiment %>% 
+  filter(index<300) %>% 
+  get_locations()
+for (i in 3:1050) {
+  print(i)
+  temp_locations <- tweets_with_sentiment %>% 
+    filter(index>=100*i&index<100*(i+1)) %>%
+    get_locations()
+  geo_locations <- geo_locations %>% 
+    bind_rows(temp_locations)
+}
+geo_locations
+saveRDS(geo_locations, file = "geo_locations_of_tweets.rds")
+```
+
+Load covid data so we can match it to tweet location...
+```{r echo = TRUE, eval = FALSE}
+covid_data<-read_csv(file="owid-covid-data.csv") %>% 
+  filter(yday(date)==yday("2020-05-20")) %>%
+  select(location,date,total_cases,new_cases,total_deaths,new_deaths,total_cases_per_million,
+         new_cases_per_million,new_deaths_per_million,population,population_density,median_age)
+```
+
+Load geographical data and define a function that returns the closest country to each tweet's location. 
+
+Note that this process only allows for rough estimates.
+
+Mutate the closest country as a new column...
+
+```{r echo = TRUE, eval = FALSE}
+location_data<-read_excel("geo_countries.xlsx")
+
+# find the closest country to a pair of lattitude and longitude coordinates
+min_country<-function(x,y){
+  min_country<-"no_country_yet"
+  minval<-100000
+  for(i in 1:240){
+    a=((x-location_data$Longitude[i])^2+(y-location_data$Latitude[i])^2)
+    min_country<-ifelse(a<minval,location_data$Country[i],min_country)
+    minval<-ifelse(a<minval,a,minval)
+  }
+  return(min_country)
+}
+geo_locations<-geo_locations%>%mutate(closest_country=min_country(x,y))
+```
+
+Join the locations and the covid data, save the results...
+```{r echo = TRUE, eval = FALSE}
+tweet_location_character<- left_join(geo_locations,covid_data,by=c("closest_country"="location"))
+saveRDS(tweet_location_character, file = "geo_characteristics_of_tweets.rds")
+```
+
+
+2. Twitter Accounts
+=====================================  
+
+### 2a. Introduction
+In this section, we will look at the different characteristics of the unique Twitter accounts in our dataset.
+
+### 2b. Unique Twitter Accounts
+Let's start by looking at the Twitter accounts in our dataset with the most followers.
+
+```{r echo = FALSE}
+# User summary:
+twts_per_user <- twts %>% 
+  group_by(screen_name) %>% 
+  tally(name = "covid_tweets")
+
+unique_users <- twts %>% 
+  distinct(screen_name, .keep_all = TRUE) %>% 
+  dplyr::select(user_id, screen_name, followers_count, friends_count, listed_count, statuses_count, verified) %>% 
+  left_join(twts_per_user, by = "screen_name")
+
+unique_users %>% 
+  dplyr::select(screen_name, followers_count, friends_count, statuses_count, covid_tweets) %>%
+  arrange(-followers_count) %>% 
+  head(10) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = kable_options)
+```
+
+The accounts with the most followers are generally news channels, but it is interesting that Katy Perry, a celebrity, made it into our dataset.
+
+### 2c. Relationship between Verified Accounts & Followers Count
+
+Let's look at the amount of verified and unverified accounts in our dataset.
+
+```{r echo = FALSE}
+unique_users %>% 
+  group_by(verified) %>% 
+  dplyr::count(name="total") %>% 
+  ungroup() %>% 
+  mutate(percentage = `total`/sum(`total`)) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = kable_options)
+```
+Nearly 94% of the unique accounts in our dataset are unverified and only around 6% of the unique accounts are verified. It will be interesting to see if there is a difference in tweet engagement or sentiment for tweets that are verified or unverified.
+
+Let's now look at the distribution for the number of followers and see how this varies with verified and unverified accounts.
+
+```{r echo = FALSE}
+quantile(unique_users$followers_count, probs = c(0, 0.25, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 0.975, 1.0))
+```
+
+By looking at the quantiles for number of followers, it is clear that there is a very strong positive skew. Around 50% of accounts have more than ~476 followers, around 10% of accounts have more than ~10000 followers, but only around 2.5% of accounts have more than ~73,000 followers. Remember though that these are only the accounts in our dataset which mentioned 'covid' and may not reflect the all Twitter accounts.
+
+### 2c. Relationship between Verified Accounts & Followers Count (Plot)
+
+```{r echo = FALSE, warning = FALSE}
+ggplot(data = unique_users, aes(x = followers_count, fill = verified, colour = verified)) + 
+  geom_histogram(bins = 40, alpha = 0.8) + 
+  scale_colour_brewer(palette = "Dark2") +  
+  scale_fill_brewer(palette="Dark2") +  
+  scale_x_continuous(trans='log10') +
+  theme(legend.position = "bottom") +
+  labs(x = "Followers Count (Log)", y = "Count", title = "Number of Followers (Log Scale)")
+```
+
+### 2c. Relationship between Verified Accounts & Followers Count (Discussion)
+
+After plotting the distribution of followers on a logarithmic scale, it's clear that as the amount of Twitter account followers increases, the proportion of these accounts which are verified also increases. In other words, larger and more high profile Twitter accounts are more likely to be verified, and smaller accounts are less likely to be verified.
+
+
+### 2d. Friends & Followers Ratio
+
+Let's see how a Twitter accounts number of friends and followers are related. Let's specifically look at accounts with between 10,000-100,000 followers, which should represent accounts which are not too small, but also not too big.
+
+### 2d. Friends & Followers Ratio (Plot)
+
+```{r echo = FALSE}
+unique_users_filtered <- unique_users %>% filter(followers_count > 10000) %>%
+  filter(followers_count < 100000)
+
+ggplot(data = unique_users_filtered, aes(x = followers_count, y = friends_count, group = verified)) +
+         geom_hex(bins = 50) +
+        theme(legend.position = "bottom") +
+        facet_wrap(~ verified) + 
+        labs(x = "Followers Count", y = "Friends Count", title = "Friends and Followers (Log Scale)")
+```
+
+### 2d. Friends & Followers Ratio (Discussion)
+
+The hex plot of friends and followers indicates that for the same amount of followers, unverified accounts are likely to have many more friends than verified accounts. 
+
+An interesting relationship also seems to be visible in the followers and friends plot for unverified users. Along the upper boundary, there appears to be near 1:1 relationship between followers and friends. That is, a lot of unverified Twitter accounts have a very similar amount of friends and followers.
+
+Let's look into this relationship by investigating accounts with more than 50,000 friends. Then, let's create a ratio of number of followers divided by number of friends, and look at this relationship in a table:
+
+```{r echo = FALSE}
+unique_users_filtered <- unique_users %>% filter(!is.na(followers_count), !is.na(friends_count), friends_count > 50000)
+
+unique_users_filtered %>% 
+  group_by(verified) %>%
+  mutate(ratio = followers_count / friends_count) %>% 
+  summarise("ratio (mean)" = mean(ratio), "ratio (median)" = median(ratio)) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = kable_options)
+```
+
+For unverified accounts with more than 50,000 friends, the middle value for the followers-friends ratio is 1.06. This means that they have 1.06 followers for every friend they have. This means that the majority of unverified accounts have around the same amount of followers as friends.
+
+For verified accounts with more than 1000 friends, the middle value for the followers-friends ratio is 3.26. This means that they have 3.26 followers for every friend they have. This means that the majority of verified accounts have far more followers than friends.
+
+### 2e. Location of Tweets (Plot)
+
+```{r echo=FALSE}
+tweets_with_location<-readRDS("geo.rds")
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+ggplot(data = world) +
+    geom_sf()+
+    geom_jitter(data=tweets_with_location,mapping=aes(x=x,y=y),size=0.03,width=0.01,height=0.01,colour="red")+ 
+    labs(x = "Longitude", y = "Latitude", title = "Location of Tweets")
+```
+
+### 2e. Location of Tweets (discussion)
+
+Finally, we can also look at where the tweets in our dataset were being made. Here is a map of the global locations of the tweets to visualise where English language conversation about 'covid' is occurring. The three most common sources of tweets in our dataset are America, The United Kingdom, and India. 
+
+Note: It is likely that tweets from Mexico are overestimated due to the way the locations are estimated.
+
+3. Tweet Engagement
+=====================================
+
+### 3a. Introduction
+
+In this section, we will look at how the different characteristics of a tweet are reflected in its level of engagement. This engagement is measured by looking at the amount of retweets and favourites.
+
+### 3b. Relationship between Likes and Retweets (Plot)
+```{r}
+tweet_data <- twts
+ggplot(data=tweet_data)+
+  geom_jitter(mapping=aes(x=log(1+favorite_count),y=log(1+retweet_count)),width=0.5,height=0.5,size=0.04) +
+  geom_smooth(mapping=aes(x=log(1+favorite_count),y=log(1+retweet_count)),colour="red") +
+  geom_smooth(mapping=aes(x=log(1+favorite_count),y=log(1+retweet_count)),method="lm") + 
+  labs(x = "Favourites Count (Log)", y = "Retweet Count (Log)", title = "Retweet Count vs Favourites Count (Log Scale)")
+  
+  
+```
+
+### 3b. Relationship between Likes and Retweets (Discussion)
+
+The vast majority of tweets have very few likes and retweets and are situated in the bottom left hand corner. The blue line is the least squares estimate of the linear relationship between the logarithm of likes and retweets in our dataset. The red line is a smoothed trendline of the relationship between likes and retweets. 
+
+In general as the number of likes increase, so does the number of retweets. However, we can see that the most popular tweets fall above the linear trend line, indicating that they are recieving disproportionately more shares relative to the number of likes, compared to an ordinary tweet.
+
+### 3c. Tweet Source (Plot)
+
+```{r}
+source_frame<-dplyr::select(tweet_data,c("index","source"))%>%group_by(source)%>%
+   dplyr::summarise(count=dplyr::n())%>%top_n(20)%>%arrange(-count)
+#source_frame
+ggplot(data=source_frame)+
+  geom_bar(mapping=aes(x=reorder(source,count),y=count,fill=reorder(source,count)),stat = "identity")+
+  coord_flip()+
+  theme(legend.position = "none") + 
+  labs(x = "Count", y = "Tweet Source", title = "Tweet Source Frequency")
+```
+
+### 3c. Tweet Source (Discussion)
+
+We can see that the vast majority of tweets come from either laptops or mobile devices. However, there are also many other sources of tweets that are likely a combination of marketing services, and social media aggregation apps. For example, Hootsuite is a social media management platform. Only the top 20 platforms have been included in the graph, but there are 1237 sources in the dataset.
+
+### 3d. Relationship between Followers and Favourites (Plot)
+```{r}
+logScaleGraph=function(df,a,b){
+  ggplot(data=df)+
+  geom_hex(mapping=aes(x=log(a+1),y=log(b+1),width=0.5,height=0.5,size=0.02))+
+  geom_smooth(mapping=aes(x=log(a+1),y=log(b+1)))+
+  geom_smooth(mapping=aes(x=log(a+1),y=log(b+1),method="lm"))
+}
+logScaleGraph(tweet_data,tweet_data$followers_count,tweet_data$favorite_count) + 
+  labs(x = "Followers Count (Log)", y = "Favourites Count (Log)", title = "Favourites Count vs Followers Count (Log Scale)")
+```
+
+
+### 3d. Relationship between Followers and Favourites (Discussion)
+
+This plot shows the density of the volume of favourites a tweet received compared with their number of followers, scaled logarithmically. we can see that the most dense part of the plot is the part with around 30 followers and zero likes. It seems as though in general the maximum number of likes increases with follower count. However, the blue trendline shows that the average number of likes also increases with follower count in a nonlinear way.
+
+### 3e. Factors Influencing Likes (Plot)
+```{r}
+a_lm <- lm(engagement_binary ~ url_count+name_counts+hashtag_count+log(followers_count+1)+favourites_count+quoted_verified+listed_count+binary_friends, data = tweet_data)
+#tidy(a_lm)
+#glance(a_lm)
+
+ggplot()+
+  geom_bar(data=tidy(a_lm),mapping=aes(x=reorder(term,estimate),y=estimate,colour=reorder(term,estimate),fill=reorder(term,estimate)),stat="identity")+
+  coord_flip()+
+  theme(legend.position = "none") + 
+  labs(x = "Estimate", y = "Factor", title = "Coefficients of Factors Influencing Likes")
+```
+
+### 3e. Factors Influencing Likes (Discussion)
+
+This plot shows the effect of certain factors on whether a tweet received any likes in a linear model. In general, having followers and friends are predictive of a tweet getting likes, while having urls and being verified are predictive of not receiving any likes. The reason why being verified is predictive of recieving no likes is probably because some marketing accounts have been verified but are not receiving any likes. In general, verified accounts have many more likes than a normal user, so for most verified accounts this negative effect would be balanced out by having many followers. However, for the small number of verified accounts without many followers it makes sense that they would not recieve many likes. It is also possible that the coefficient of verified is an unintended consequence of using a linear model for binary classification.
+
+4. Word Clouds
+===================================== 
+
+### 4a. Introduction
+
+In this section, we will look at the most commonly used words in the tweets that make reference to 'covid'. When preparing the data, we tokenised it by tweets which preserved the usernames, hashtags and HTML’s in order to not remove any data that maybe useful for analysis.
+
+### 4b. Original Word Cloud (Plot)
+
+```{r}
+tweeting_data <- twts
+text_data <- tweeting_data %>% dplyr::select(c("index","text")) %>%
+  unnest_tokens(output = word, input = text, token = "tweets", to_lower=TRUE, strip_pun=TRUE, strip_url = TRUE)
+stopwords <- get_stopwords()
+text_data_stopwords <- anti_join(text_data, stopwords)
+text_data_clean <- text_data_stopwords %>% group_by(word) %>%  dplyr::summarise(count = n()) %>% top_n(300) %>% arrange(-count)
+```
+
+```{r}
+set.seed(1234)
+wordcloud(words = text_data_clean$word, freq = text_data_clean$count, min.freq = 1,
+          max.words = 200, random.order = FALSE, rot.per = 0.35, 
+          colors = brewer.pal(8, "Dark2"))
+```
+
+### 4b. Original Word Cloud (Discussion)
+
+Here we have produced a word cloud for the most popular words in our dataset. Remember that our dataset contained tweets which referenced 'covid', so it makes sense that many terms like 'covid19', 'covid' and '#covid19' have showed up frequently in our word cloud. In addition, we can also see words such as 'people', 'cases', 'patients' and 'lockdown'. Interestingly, '@realdonaldtrump' also shows up in the word cloud, which means many tweets featured this tag.
+
+### 4c. Filtered Word Cloud (Plot)
+
+```{r}
+text_data_clean2 <- filter(text_data_clean, !(word %in% c("covid19", "covid", "coronavirus", "#covid19", "#covid", "#coronavirus", "amp", "19", "2020", "1", "2")))
+set.seed(1234)
+wordcloud(words = text_data_clean2$word, freq = text_data_clean2$count, min.freq = 1,
+max.words = 200, random.order = FALSE, rot.per = 0.35, scale=c(3.5,0.25), colors=brewer.pal(8, "Dark2"))
+```
+
+### 4c. Filtered Word Cloud (Discussion)
+
+Further cleaning was taken to remove numbers and symbols which were not removed earlier, in order to make the word clouds as clear as possible. Additionally, words synonymous with or variations of ‘covid’ were removed from the data. The most used word in tweets containing ‘covid’ is the word ‘people’ which has no sentiment related to it. However, common words including ‘like’ which has a positive sentiment and ‘deaths’ which has a negative sentiment are both frequently used in ‘covid’ tweets
+
+This analysis of the most used words suggests that tweets about ‘covid’ may both be written with positive or negative connotations. However, there is a strong concern for ‘people’ (a neutral word), possibly because individuals have both the potential to positively affect the control of the virus as well as to be negatively affected by the outbreak of the virus. 
+
+Other words which showed up frequently include 'pandemic', 'deaths' and 'health'.
+
+### 4c. Word Cloud for Positive Sentiment (Plot)
+
+```{r}
+sentiments <- get_sentiments("afinn")
+text_data_sentiments <- text_data_stopwords %>%
+  inner_join(sentiments)
+text_data_clean_positive <-
+  text_data_sentiments %>% filter(value > 0) %>% group_by(word) %>% dplyr::summarise(count = n()) %>% top_n(300) %>% arrange(-count)
+text_data_clean_negative <-
+  text_data_sentiments %>% filter(value < 0) %>% group_by(word) %>% dplyr::summarise(count = n()) %>% top_n(300) %>% arrange(-count)
+```
+```{r}
+set.seed(1234)
+wordcloud(
+  words = text_data_clean_positive$word,
+  freq = text_data_clean_positive$count,
+  min.freq = 1,
+  max.words = 200,
+  random.order = FALSE,
+  rot.per = 0.35,
+  colors = rev(brewer.pal(8, "Greens")[4:8])
+)
+```
+
+### 4d. Word Cloud for Negative Sentiment
+
+```{r}
+set.seed(1234)
+wordcloud(
+  words = text_data_clean_negative$word,
+  freq = text_data_clean_negative$count,
+  min.freq = 1,
+  max.words = 200,
+  random.order = FALSE,
+  rot.per = 0.35,
+  colors = rev(brewer.pal(8, "Reds")[4:8])
+)
+```
+
+
+### 4d. Word Cloud for Positive and Negative Sentiment (Discussion)
+
+Finally, the words were categorised using the lexicon 'afinn' and then filtered based on being greater or less than 0 to create separate word clouds containing only positive or negative sentiment words. The central positive words used were ‘like’, ‘help’ and ‘care’ and the main negative words used were ‘death’, ‘crisis’ and ‘died’. 
+
+It can be seen that the top positive and negative sentiment words are likely to be paired with ‘people’. ‘People’ have the ability to ‘care’ and ‘help’ the virus to reduce its spread. However, ‘people’ may also ‘die’ or experience ‘death’ around them as a result of the outbreak. This supports the analysis on the word ‘people’ and emphasises how individuals collectively can be being tweeted about in both a positive or negative sentiment in relation to COVID-19.
+
+5. Sentiment Analysis
+=====================================
+
+### 5a. Introduction
+
+In this section, we will look at relationship between the sentiment expressed in a tweet and the level of engagement it received.
+
+
+### 5b. Tweets with Strong Sentiment (Table)
+
+In our dataset, we have 10 different emotions in the 'nrc' library and we can investigate the tweets which expressed the largest quantity of these emotions. We have written a function that, for a given emotional sentiment, extracts the tweets with the most words of that specific sentiment. The results are summarised and expressed below.
+
+```{r echo = FALSE}
+selection <- c("screen_name", "text", "followers_count", "friends_count", "listed_count", "statuses_count", "favourites_count", "retweet_count", "average_positive_sentiment", "emotion", "verified")
+
+extract_emotion <- function(data, emotion, threshold){
+  twts_clean <- data %>% 
+    filter(!is.na(emotion))
+  twts_clean %>% 
+    filter(twts_clean[emotion] > quantile(twts_clean[emotion], threshold, na.rm = TRUE)) %>%
+    mutate("emotion" = c(emotion)) %>%
+    dplyr::select(all_of(selection))
+}
+
+quantile_min <- 0.98
+twts_emotion <- rbind(extract_emotion(twts, "anger", quantile_min),
+                      extract_emotion(twts, "joy", quantile_min),
+                      extract_emotion(twts, "positive", quantile_min),
+                      extract_emotion(twts, "surprise", quantile_min),
+                      extract_emotion(twts, "fear", quantile_min),
+                      extract_emotion(twts, "negative", quantile_min),
+                      extract_emotion(twts, "sadness", quantile_min),
+                      extract_emotion(twts, "trust", quantile_min),
+                      extract_emotion(twts, "disgust", quantile_min),
+                      extract_emotion(twts, "anticipation", quantile_min))
+
+twts_emotion %>% 
+  group_by(emotion) %>% 
+  dplyr::summarise("favourites (median)" = median(favourites_count), "followers (median)" = median(followers_count)) %>% 
+  left_join(twts_emotion %>% group_by(emotion) %>% tally(name = "tweets_extracted"), by = "emotion") %>%
+  arrange(-`favourites (median)`) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = kable_options)
+```
+
+It looks like the tweets which displayed strong amounts of disgust, anger, negative and surprise were the ones which were the most favourited. Tweets which displayed strong amounts of positivity, trust and joy were the ones with the least amount of favourites.
+
+Let's now look at the tweets with the most words of each emotional sentiment for verified accounts. Since verified accounts generally have more engagement, we can look at the amount of favourites of the tweets as well as the amount of retweets.
+```{r echo = FALSE}
+twts_emotion_verified <- twts_emotion %>% 
+  filter(retweet_count > 0, verified == TRUE) %>% 
+  group_by(verified, emotion) %>%
+  dplyr::summarise(favourites_count = median(favourites_count), followers_count = median(followers_count), retweet_count = median(retweet_count)) %>%
+  left_join(twts_emotion %>% group_by(emotion) %>% tally(name = "count"), by = "emotion")
+```
+
+### 5b. Tweets with Strong Sentiment from Verified Accounts (Plot)
+
+```{r}
+g1 <- ggplot(data = twts_emotion_verified, aes(x=fct_reorder(emotion, favourites_count, .desc = TRUE), y=favourites_count, fill = "#1B9E77")) +
+  geom_bar(stat = "identity") +
+  theme(legend.position = "none") +
+  labs(x = "Emotion", y = "Median Favourites")
+
+g2 <- ggplot(data = twts_emotion_verified, aes(x=fct_reorder(emotion, retweet_count, .desc = TRUE), y=retweet_count, fill ="#ce4a08")) + 
+  geom_bar(stat = "identity") +
+  theme(legend.position = "none") +
+  labs(x = "Emotion", y = "Median Retweets")
+
+grid.arrange(g1, g2, ncol = 1)
+```
+
+### 5b. Tweets with Strong Sentiment from Verified Accounts (Discussion)
+
+Here, it is very clear that tweets from verified accounts which displayed large amount of anger and fear received the most favourites. Tweets which displayed the largest amount of trust received the least favourites. Tweets which displayed a large amount of disgust, surprise and sadness received the most retweets, while tweets which displayed the most positivity and trust received the least retweets.
+
+From this analysis of emotional sentiment, it appears that tweets which feature the most negative sentiment have the most engagement. This may be because the tweets with negative sentiment are more attention grabbing, create more fear, and invoke other emotional response in viewers.
+
+
+### 5c. Relationship between Sentiment and Likes (Plot)
+```{r}
+#mutate standardised sentiment to the dataframe
+tweet_data<-mutate(tweet_data,st_anticipation=anticipation/num_words,
+                     st_anticipation=anticipation/num_words,
+                     st_joy=joy/num_words,
+                     st_positive=positive/num_words,
+                     st_surprise=surprise/num_words,
+                     st_anger=anger/num_words,
+                     st_fear=fear/num_words,
+                     st_negative=negative/num_words,
+                     st_sadness=sadness/num_words,
+                     st_trust=trust/num_words,
+                     st_disgust=disgust/num_words)
+a_lm <- lm(log(favorite_count+1)~ st_anticipation+st_joy+st_positive+st_surprise+st_anger+st_fear+st_negative+st_sadness+st_trust+st_disgust, data = tweet_data)
+#tidy(a_lm)
+#glance(a_lm)
+
+ggplot()+
+  geom_bar(data=tidy(a_lm),mapping=aes(x=reorder(term,estimate),y=estimate,colour=reorder(term,estimate),fill=reorder(term,estimate)),stat="identity")+
+  coord_flip()+
+  theme(legend.position = "none") + 
+  labs(x = "Estimate", y = "Sentiment", title = "Coefficients of Sentiments Influencing Likes")
+```
+
+### 5c. Relationship between Sentiment and Likes (Discussion)
+
+Finally, the above graph shows how different sentiments affect the logarithm of the expected number of likes a tweet in our dataset will get. This analysis is different from our earlier analysis, because instead of isolating tweets that display one particular emotion multiple times, we use a linear regression which looks at the effect of all the emotions in a tweet combined together.
+
+From the graph, we see that joy, sadness and fear tend to increase the number of likes a tweet receives. Conversely, tweets expressing anger, anticipation, trust, and positivity perform slightly below average. Tweets with disgust, negativity, and surprise performed the worst.
+
+6. Nation Analysis
+=====================================
+
+### 6a. Introduction
+
+In this section, we will look at which nations are tweeting the most about COVID-19 and the sentiment that the more affected nations express.
+
+### 6b. Top Tweeting Nations (Plot)
+
+```{r}
+#Find the top 5 tweeting nations and filter them out
+geo_locations<-readRDS(file = "geo.rds")
+location_data<-read_excel("geo_countries.xlsx")
+
+#find the closest country to a pair of lattitude and longitude coordinates
+min_country<-function(x,y){
+  min_country<-"no_country_yet"
+  minval<-100000
+  for(i in 1:240){
+    a=((x-location_data$Longitude[i])^2+(y-location_data$Latitude[i])^2)
+    min_country<-ifelse(a<minval,location_data$Country[i],min_country)
+    minval<-ifelse(a<minval,a,minval)
+  }
+  return(min_country)
+}
+
+geo_locations<-geo_locations%>%mutate(closest_country=min_country(x,y))
+
+top_twitter <- count_(geo_locations, "closest_country") %>%
+  filter(closest_country %in% c("United States", "United Kingdom", "Bermuda", "Mexico", "India")) %>%
+  arrange (-n)
+
+#Plot the graph
+ggplot(top_twitter,
+       aes(x = closest_country,
+           y = n)) +
+  geom_bar(stat = "identity")  + 
+  labs(x = "Closest Country", y = "Count", title = "Top Tweeting Nations")
+```
+
+### 6b. Top Tweeting Nations (Discussion)
+
+First, we want to gather a quick summary of which countries are most actively using Twitter to discuss COVID-19. To do this we obtain a count of number of Tweets made in each nation and graph it. Based on our output, these are the top 5 nations who are tweeting about COVID-19. This is able to provide an overview about which nations are most involved with discussions of COVID-19 via the internet. It is interesting to see that Bermuda, with such a small population in relation to the other top 5 nations has had such a significant number of Tweets.
+
+Following this, we can look at the nations that are tweeting the most per capita to gather insight on which countries are tweeting the most in proportion to their population.
+
+### 6c. Top Tweeting Nations Per 10,000 (Plot)
+
+```{r}
+#Find the top tweeting nations per 10000
+covid_data <- read_csv(file = "owid-covid-data.csv") %>%
+  filter(yday(date) == yday("2020-05-20")) %>%
+  select(
+    location,
+    date,
+    total_cases,
+    new_cases,
+    total_deaths,
+    new_deaths,
+    total_cases_per_million,
+    new_cases_per_million,
+    new_deaths_per_million,
+    population,
+    population_density,
+    median_age
+  )
+
+top_twitter2 <- count_(geo_locations, "closest_country")
+
+top_twitter_bar <-
+  left_join(top_twitter2, covid_data, by = c("closest_country" = "location")) %>%
+  mutate(tweet_per_10000 = (n / population) * 10000) %>%
+  filter(
+    closest_country %in% c("Liechtenstein", "Bahamas", "Monaco", "Swaziland", "San Marino")
+  ) %>%
+  arrange(-tweet_per_10000)
+
+
+#Plot the graph
+ggplot(top_twitter_bar,
+       aes(x = closest_country,
+           y = tweet_per_10000)) +
+  geom_bar(stat = "identity") + 
+  labs(x = "Closest Country", y = "Count Per 10,000", title = "Top Tweeting Nations Per 10,000")
+```
+
+### 6c. Top Tweeting Nations Per 10,000 (Discussion)
+
+In this output, we can see that the Bahamas has the highest number of tweets per 10,000 people by a significant amount. Following the Bahamas is Monaco with approximately 1.5 tweets per 10,000 with the remaining three countries having much lower levels of tweeting per capita. 
+
+Following this information, we want to determine whether a negative sentiment is expressed in the Tweet data for all nations. We would expect that nations with lower levels of COVID-19 infectivity would express less negative sentiment than that of nations who are more negatively affected by the effects of COVID-19. It will also be interesting to see whether the nations represented in the charts above express a more positive or negative sentiment. This data can be presented on a map.
+
+Because tweets were assigned locations based on proximity to countries, it is very likely that this distribution does not accurately reflect the volume of english tweets per capita in the countries displayed.
+
+### 6d. Total Cases Per Million (Map)
+
+```{r warning = FALSE, message = FALSE, results='hide', fig.keep='all'}
+# Remove outlierS values from covid_data
+covid_data2 <- covid_data[-c(170, 199, 160, 6, 118),]
+
+# Create Map
+shtml <-
+  joinCountryData2Map(covid_data2, joinCode = "NAME", nameJoinColumn = "location")
+colourPalette <- brewer.pal(5, 'RdPu')
+
+mapCountryData(
+  shtml,
+  nameColumnToPlot = "total_cases_per_million",
+  catMethod = "pretty",
+  colourPalette = colourPalette,
+  mapTitle = "Total Cases Per Million"
+)
+
+```
+
+### 6d. Total Cases Per Million (Discussion)
+
+Note: When Interpreting these maps, locations are based on estimates on coordinates.
+
+From the map, we can deduce the nations that are most effected by COVID-19. Nations that stand out as particularly affected are the United States, Spain, Singapore and Belgium. Some of the nations represented in the previous charts typically have higher cases per million according to this map, implying that there may not be a clear relationship between number of tweets about Covid-19 and the level of outbreak in that nation. 
+
+Using this information, we can also map the average sentiment by nation and view the relationship between the size of an outbreak within a nation, and the emotional expression in tweets from that nation. We would expect to see a relationship between countries with higher outbreaks and more negative expression in the tweets. 
+
+### 6e. Postive Sentiment and Total Cases Per Million (Map)
+
+```{r warning = FALSE, message = FALSE, results='hide', fig.keep='all'}
+#Get the average sentiment by nation
+tidy_tweets_positive <- twts
+global_sentiment <-
+  left_join(geo_locations, tidy_tweets_positive, by = c("index"))
+
+nation_sentiment <- global_sentiment %>%
+  group_by(closest_country) %>%
+  dplyr::mutate("Average Positive Sentiment" = mean(average_positive_sentiment, na.rm = TRUE))
+
+#Combine Covid data with sentiment data
+mapdata <-
+  left_join(covid_data2,
+            nation_sentiment,
+            by = c("location" = "closest_country"))
+
+#Create Map
+spdf <-
+  joinCountryData2Map(mapdata, joinCode = "NAME", nameJoinColumn = "location")
+
+mapBubbles(
+  spdf,
+  nameZSize = "total_cases_per_million.y",
+  nameZColour = "Average Positive Sentiment",
+  colourPalette = colourPalette,
+  oceanCol = "lightblue",
+  landCol = "wheat",
+  catMethod = "pretty",
+  fill = FALSE,
+  lwdSymbols = 2,
+  legendTitle = "Total Cases Per Million",
+  addLegend = FALSE,
+  legendHoriz = TRUE
+)
+
+```
+
+### 6e. Postive Sentiment and Total Cases Per Million (Discussion)
+
+From the output in the map, we can see that nations with larger outbreaks are surprisingly more positive in their sentiment. Based on the map, it seems that most of the negative sentiment is in Eastern Europe, regions of Africa. The country showing the most negative sentiment is Brazil. This is likely a result of nations within these regions having issues with lack of medical supplies as stated in many media reports and is thus having an impact on the mental wellbeing of its citizens.
+
+Overall, it is interesting to see that nations who are more greatly affected by Covid-19 still show high levels of positive sentiment. It is also worth noting that the countries that are tweeting the most, in particularly the United Kingdom and the United States, express high levels of positive sentiment which would suggest that tweets generally show positive sentiment. There does not seem to be a clear relationship between higher levels of outbreak and negative sentiment as previously believed which would imply that COVID-19 impact in a nation does not necessarily affect the positivity of its population in tweets. 
